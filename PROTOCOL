@@ -1,0 +1,454 @@
+DDP - Danny's Digital Packet
+============================
+Copyright:        (c)2010-2012 - Daniel Knaggs, 2E0DPK/M6DPK
+Protocol Version: 0.6.1
+Protocol Date:    27th August 2012
+
+
+Preface
+=======
+This document is here to assist you in understanding and/or possibly implementing DDP in your favourite machine language.  DDP is currently implemented in Python.  If you decide to implement DDP in another language or use it in your own program, please note the LICENSE before continuing.  Try to keep all the names of the classes, subroutines, variables, etc the same.
+
+I hope this document helps, comments/suggestions are welcome.
+
+
+*** Please note that any example packets in this document will have invalid content since I made them up. ***
+
+
+#######################################
+# 7-bit Specification - Internal ID 0 #
+#######################################
+
+Sections
+========
+The specification is quite simple consisting of sections seperated by a pipe (|) character, there are 12 sections...
+
+*DDPH*|0610|ABC001|DEF004|ABC002|abcd|013a5d8abe57e2ab549a686e934c4a5bc3cef607|96b4dafb1294f616ea0c69da113b5eb3cf78efec|XQAAgAAAKxJEs5jX7EoHL4bMARYM7w3//KVwAA==|12376c6194abcdef0abef3038abaae1817c98aa1346190abef3c6176c61990ab12376c6194abcdef0abef3038abaae1817c98aa1346190abef3c6176c61990ab|96b4dafb1294f616ea0c69da113b5eb3cf78efec|*DDPF*
+   0     1     2      3      4     5                    6                                      7                                        8                                                                                    9                                                                                     10                        11
+
+===============================
+Section | Description
+========+======================
+   0	| DDP Header
+   1	| DDP Protocol Version
+   2	| Source Callsign
+   3	| Via
+   4	| Destination Callsign
+   5	| Flags
+   6	| Application ID
+   7	| Packet ID
+   8	| Data
+   9	| Signature
+  10	| Checksum
+  11	| DDP Footer
+==============================
+
+
+Section 0 - DDP Header
+^^^^^^^^^^^^^^^^^^^^^^
+The header is just a fixed "*DDPH*", nothing special.
+
+Section 1 - DDP Protocol Version
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The protocol version indicates the version of the packet sent, this so we can allow backwards compatibility when we reach v1.0.0.  Until then, do not allow backwards compatibility - This may change in the future.
+
+Section 2 - Source Callsign
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The source callsign is the callsign the packet originated from.
+
+Section 3 - Via
+^^^^^^^^^^^^^^^
+If the packet is transmitted by a repeater it will populate this section with the repeater callsign.
+
+Section 4 - Destination Callsign
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The destination callsign is the callsign where the packet is destinated to.
+
+Section 5 - Flags
+^^^^^^^^^^^^^^^^^
+Starting from v0.5.4, the flag section is hex encoded to save space.  However, when the packet is parsed it is split for you so you can still check each bit.
+
+The flags are shown with the least significent bit (LSB) on right hand side.  Currently we use 16 bits, 0 is false and means it's not set where as 1 is true and means it is set: -
+
+========================================================
+Bit	| Description
+====+===================================================
+ 0	| TCP
+ 1	| Compression
+ 2	| EC (Error Correction)
+ 3	| Return data
+ 4	| Reserved for future use
+ 5	| Reserved for future use
+ 6	| Reserved for future use
+ 7	| Reserved for future use
+ 8	| Reserved for future use
+ 9	| Reserved for future use
+10	| Reserved for future use
+11	| Reserved for future use
+12	| SYN
+13	| ACK
+14	| FIN
+15	| RST
+========================================================
+
+Section 6 - Application ID
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+A GUID encoded in SHA1 which represents the application the packet was generated from.  This is used ensure we only process packets which we are expecting from a single application.
+
+Section 7 - Packet ID
+^^^^^^^^^^^^^^^^^^^^^
+A unique GUID for the packet encoded in SHA1.  Used for packet replay detection - introduced in v0.5.1.
+
+Section 8 - Data
+^^^^^^^^^^^^^^^^
+The actual payload of the data which is first scrambled (starting with v0.4.2) then optionally compressed using GZIP but always encoded in Base128 hex.
+
+Section 9 - Signature
+^^^^^^^^^^^^^^^^^^^^^
+This is a signature generated using your RSA private key.  More on this further down this document...
+
+Section 10 - Checksum
+^^^^^^^^^^^^^^^^^^^^^
+The SHA1 checksum of the packet starting from source callsign to the end of the signature section, this includes the section seperators.
+
+Section 11 - DDP Footer
+^^^^^^^^^^^^^^^^^^^^^^^
+The footer is just a fixed "*DDPF*", nothing special.
+
+
+
+#######################################
+# 8-bit Specification - Internal ID 1 #
+#######################################
+
+Sections
+========
+The binary version of specification is basically the same but bares more resemblance to a ethernet frame...
+
+------------------------------------
+| DDP Header           ( 6 octets) |
+------------------------------------
+| DDP Version          ( 4 octets) |
+------------------------------------
+| Source Callsign      (10 octets) |
+------------------------------------
+| Via                  (10 octets) |
+------------------------------------
+| Destination Callsign (10 octets) |
+------------------------------------
+| Flags                ( 2 octets) |
+------------------------------------
+| Application ID       (20 octets) |
+------------------------------------
+| Packet ID            (20 octets) |
+------------------------------------
+| Data                 (XY octets) |
+------------------------------------
+| Signature            (64 octets) |
+------------------------------------
+| Checksum             (20 octets) |
+------------------------------------
+| DDP Footer           ( 6 octets) |
+------------------------------------
+
+
+The sections are not seperated by a fixed character, so to sepearate the sections out used the fixed octet values.  Since the data can vary in size apply the same technique but backwards from the footer.
+
+Most fields (flags, source IP, etc) are converted to Base256 and are padded with the null characters (\x00) to fill the required space.
+
+
+However, when the packet is scrambled and/or encoded with Reed-Solomon the packet is encapsulated in itself (never encapsulated twice, it's only done once): -
+
+------------------------------------
+| Preample             ( 8 octets) |
+------------------------------------
+| DDP Header           ( 6 octets) |
+------------------------------------
+| Scrambled Data       (XY octets) |
+------------------------------------
+| DDP Footer           ( 6 octets) |
+------------------------------------
+| Ample                ( 8 octets) |
+------------------------------------
+
+
+Before transmission starts and ends a preample is added to aid modem lock.  This consists of thirty two "\xcc" characters which is suitable for BT 0.5 GMSK modems (this has been upped from eight starting from v0.4.0).  The preample is only added when using the RS-232/GMSK backend, it's not needed for anything else.  The number of characters for the preample is changed depending on the backend: -
+
+--------------------------
+| Backend		Preample |
+--------------------------
+| GMSK				16   |
+| RS-232			 4   |
+--------------------------
+
+Scrambling of the data is always enabled starting from version v0.3.1 when using the 8-bit protocol.  Remember that the whole (original) packet is first encoded in Reed-Solomon (if enabled), then scrambled, and finally encapsulated.  To decode, reverse the order.
+
+
+
+###########################################################
+# Short Message Specification (Text Only) - Internal ID 2 #
+###########################################################
+
+Sections
+========
+The specification is quite simple consisting of sections seperated by a pipe (|) character, it is very similar to the 7-bit specification.
+
+This specification is intended to be used to send short messages for example when doing EME, meteorscatter, or anything else you can think of.  Features like error correction, compression, application ID, packet ID, signatures, or any of the other great features aren't available with this specification - this is too keep the packet size down.
+
+You could say this is for very special purposes only.  But can also be useful when just sending plain messages to other users like with the IM example code but feel free to try anything else.
+
+
+*DDPH*|0540|ABC001|ABC002|abcd|CQ CQ CQ|5a|*DDPF*
+   0     1     2      3    4       5     6    7
+
+===============================
+Section | Description
+========+======================
+   0	| DDP Header
+   1	| DDP Protocol Version
+   2	| Source Callsign
+   3	| Destination Callsign
+   4	| Flags
+   5	| Data
+   6	| Checksum
+   7	| DDP Footer
+==============================
+
+
+Section 0 - DDP Header
+^^^^^^^^^^^^^^^^^^^^^^
+The header is just a fixed "*DDPH*", nothing special.
+
+Section 1 - DDP Protocol Version
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The protocol version indicates the version of the packet sent, this so we can allow backwards compatibility when we reach v1.0.0.  Until then, do not allow backwards compatibility - this may change in the future.
+
+Section 2 - Source Callsign
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The source callsign is the callsign the packet originated from.
+
+Section 3 - Destination Callsign
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The destination callsign is the callsign where the packet is destinated to.
+
+Section 4 - Flags
+^^^^^^^^^^^^^^^^^
+The flag section is hex encoded to save space.  However, when the packet is parsed it is split for you so you can still check each bit.
+
+The flags are shown with the least significent bit (LSB) on right hand side.  Currently we use 16 bits, 0 is false and means it's not set where as 1 is true and means it is set: -
+
+========================================================
+Bit	| Description
+====+===================================================
+ 0	| TCP
+ 1	| Compression
+ 2	| EC (Error Correction)
+ 3	| Return data
+ 4	| Reserved for future use
+ 5	| Reserved for future use
+ 6	| Reserved for future use
+ 7	| Reserved for future use
+ 8	| Reserved for future use
+ 9	| Reserved for future use
+10	| Reserved for future use
+11	| Reserved for future use
+12	| SYN
+13	| ACK
+14	| FIN
+15	| RST
+========================================================
+
+Section 5 - Data
+^^^^^^^^^^^^^^^^
+Data must be in plain text.  Characters 9, 10, 13, 27, 32-127 are only allowed (the pipe character should be converted to chr(27) ie ESC but it's better if it doesn't even appear in the data section) - take a look at the encodeData() routine.
+
+Section 6 - Checksum
+^^^^^^^^^^^^^^^^^^^^
+A much simplier checksum which is also used for calculating the checksum of GPS sentences, a simple XOR of the packet starting from source callsign to the end of the data section, this includes the section seperators.  Take a look at the xorChecksum() routine.
+
+Section 7 - DDP Footer
+^^^^^^^^^^^^^^^^^^^^^^^
+The footer is just a fixed "*DDPF*", nothing special.
+
+
+#############################################################
+# Short Message Specification (Hex Encoded) - Internal ID 3 #
+#############################################################
+Exactly the same as the SMS specification above except the data section is handled the same as the 7-bit specification (ID 0, but excluding compression) allowing binary transfer.
+
+Remember, the SMS specification is designed to be very simple.
+
+
+
+############
+# Workings #
+############
+
+~~~~~~~~~~~~~~~~~~~~~~~
+~ Packet Transactions ~
+~~~~~~~~~~~~~~~~~~~~~~~
+Those who are familar with TCP/IP will see some resemblance however, they're some differences: -
+
+The first packet sent will have the SYN flag sent, it then gets ACK'ed (if the TCP flag was set), and this then continues until all the data is transmitted then a FIN packet is sent to indicate it has FINished.  Note that the FIN packet will also get ACK'ed if the TCP flag is set.  The SYN is not a three way transaction like the TCP/IP, it's just two for DDP.
+
+TCP Example
+^^^^^^^^^^^
+SYN ==>
+    <== SYN-ACK
+SYN ==>
+    <== SYN-ACK
+SYN ==>
+    <== SYN-ACK
+etc...
+FIN ==>
+    <== FIN-ACK
+
+*Data returned to application*
+
+UDP Example
+^^^^^^^^^^^
+SYN ==>
+SYN ==>
+SYN ==>
+etc...
+FIN ==>
+
+*Data returned to application*
+
+
+Starting with v0.4.2, the FIN packet maybe not be sent - in this case return the single packet when receiving data.  This is used for more specialised applications like DDV and other stateless applications (like the fax example).
+
+
+However, starting with v0.6.1 there is new flag (bit 3) which states whether the data should be returned to client immediately for advanced applications (e.g. DDV/fax/etc) - only valid for SYN packets.
+
+So if the flag is set for TCP packet: -
+
+SYN ==>
+    <== SYN-ACK
+
+*Data returned to application*
+
+
+And for a UDP packet: -
+
+SYN ==>
+
+*Data returned to application*
+
+
+By default the flag will be set to zero which means the data will only be returned to application once everything has arrived.
+
+
+The protocol is designed to allow the server/client to have TCP enabled or not and can switched on or off on-the-fly on packet-by-packet basis.  This gives greater control.
+
+If for some reason the server/client wants to stop, send a RST packet.  You must react to the RST immediately.  RST packets are not ACK'ed.
+
+The data payload is normally broken up into smaller chunks, this will allow for re-transmission if for some reason it did not make it or the checksum failed.  The transmitData()/receiveData() subroutines performs this for you.  If the packet fails any check, wait for the timeout to expire, we do not send another packet back to indicate it has failed.  This is to help prevent a denial-of-service (DoS) attack.
+
+The packet length is currently variable, this one of the reasons we use the header and the footer to locate the packet in the buffer.  The packet may start and end with a line feed character chr(10) (UNIX newline character), this is optional as it may help some of the backends you use.
+
+Normally we use GZIP (starting from v0.5.0 PyLZMA has been dropped) for compressing the data payload but you don't have to by not setting the COMPRESSION flag.  The data, after optionally compressing, is then encoded to Base128 (hex encoded).  I wanted the packet to use only printable characters and use as little characters as possible, this is so we can use as many datamodes in fldigi as possible.  However, we need to use a case-sensitive datamode since we use mixed cases.  So datamodes like RTTY are out of the question.
+
+
+~~~~~~~~~~~~~
+~ Scrambler ~
+~~~~~~~~~~~~~
+The scrambler (introduced in v0.3.1) is very simple, using Python's random module I seed it using the protocol header, version, and footer.  Then each character in the packet is then XOR'ed with a random integer between 0 and 255.  Since we're seeding it on both sides with the same value the sequence of numbers produced by the generator will be the same.
+
+To descramble, just feed it through the same routine.  Nothing is different.
+
+
+~~~~~~~~~~~~~~~~
+~ Reed-Solomon ~
+~~~~~~~~~~~~~~~~
+Introduced in v0.3.1, all packets sent with using the 8-bit protocol will encoded using Reed-Solomon(64,32) (as long as the "pyreedsolomon" directory is present).
+
+
+~~~~~~~~~~~~~~
+~ Interleave ~
+~~~~~~~~~~~~~~
+This was introduced in v0.3.3, all packets sent using the 8-bit protocol which are encoded using Reed-Solomon will be interleaved to improve it's correction factor.
+
+It's implemented as 8x8 matrix like this: -
+
+    12345678
+  -----------
+A | XXXXXXXX
+B | XXXXXXXX
+C | XXXXXXXX
+D | XXXXXXXX
+E | XXXXXXXX
+F | XXXXXXXX
+G | XXXXXXXX
+H | XXXXXXXX
+
+Characters are fed in starting from A1, A2, ... B1, B2, ... H1, ... H8.  Think of it as buffer which is line-based.
+
+To get the interleaved stream, read back the data in this order: H8, G8, F8, E8, D8, C8, B8, A8, H7, G7, ... B1, A1.  Put another way, start reading the data backwards but upwards starting at the end of matrix.
+
+
+Example using the above data: -
+
+Din  = "ABCDEFGH01234567IJKLMNOP89012345QRSTUVWX67890123YZabcdef45678901"
+
+    12345678
+  -----------
+A | ABCDEFGH
+B | 01234567
+C | IJKLMNOP
+D | 89012345
+E | QRSTUVWX
+F | 67890123
+G | YZabcdef
+H | 45678901
+
+Dout = "1f3X5P7H0e2W4O6G9d1V3N5F8c0U2M4E7b9T1L3D6a8S0K2C5Z7R9J1B4Y6Q8I0A"
+
+
+
+To deinterleave the data just feed it through the same routine: -
+
+Din  = "1f3X5P7H0e2W4O6G9d1V3N5F8c0U2M4E7b9T1L3D6a8S0K2C5Z7R9J1B4Y6Q8I0A"
+
+    12345678
+  -----------
+A | 1f3X5P7H
+B | 0e2W4O6G
+C | 9d1V3N5F
+D | 8c0U2M4E
+E | 7b9T1L3D
+F | 6a8S0K2C
+G | 5Z7R9J1B
+H | 4Y6Q8I0A
+
+Dout = "ABCDEFGH01234567IJKLMNOP89012345QRSTUVWX67890123YZabcdef45678901"
+
+
+
+The interleave() routine will break the data up into smaller chunks according to the N value of Reed-Solomon.  This is 64 by default so the matrix is the square root of that value.
+
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~ Packet Replay Detection ~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Introduced in v0.5.1, Packet Replay Detection (PRD) prevents duplicate packets being accepted by the receivePacket() routine.  Each packet transmitted should have a unique ID number which is SHA1 encoded, you can generate the unique value however you want - however, I recommend it based on the hosts name and the current date and time.
+
+
+~~~~~~~~~~~~~~~~~~~~~~
+~ Callsign Signature ~
+~~~~~~~~~~~~~~~~~~~~~~
+Introduced in v0.5.1, callsign signature allows you to authenticate packets generated by any callsign which is handled by DDP.  This is implemented using RSA public/private key pairs, we do NOT encrypt the payload for transmitting - we only use it for signature (signing/hashing) purposes.
+
+To generate the signature we: -
+
+1. Take the same data as the checksum routine does
+2. Generate the signature (ie. sign it) based on the encrypted data using our private key (currently we use 512 bit keys)
+
+Then to validate the packet we use the public key for client held on the server.  If it doesn't validate, discard it.  Otherwise process it.
+
+The callsign signature section CAN be left blank (or in case of the 8-bit protocol, filled with nulls) - in this case, the packet should be treated as UNTRUSTED but still processed and the user notified.  If the validation has succeeded you can treat the packet as TRUSTED from the specified callsign, if it doesn't validate discard it.
+
+
+The key exchange (KEX) is either handled manually or by using KEX example code to transfer the public keys over the air.  Use whichever method suits your needs.
+
+<EOF>
